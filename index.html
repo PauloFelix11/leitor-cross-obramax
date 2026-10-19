@@ -1,0 +1,279 @@
+
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#002A5B">
+  <title>Obramax | Leitor de posição</title>
+
+  <style>
+    :root {
+      --azul: #002A5B;
+      --laranja: #EF7F00;
+      --fundo: #f2f4f7;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 20px;
+      background: var(--fundo);
+      color: #202733;
+      font-family: Arial, sans-serif;
+    }
+
+    main {
+      width: 100%;
+      max-width: 520px;
+      margin: 0 auto;
+      background: #fff;
+      border-radius: 14px;
+      overflow: hidden;
+      box-shadow: 0 4px 18px #00000012;
+    }
+
+    header {
+      background: var(--azul);
+      color: #fff;
+      padding: 22px;
+      border-bottom: 6px solid var(--laranja);
+    }
+
+    header h1 {
+      margin: 0 0 7px;
+      font-size: 22px;
+    }
+
+    header p {
+      margin: 0;
+      font-size: 14px;
+    }
+
+    .conteudo {
+      padding: 20px;
+    }
+
+    video {
+      display: block;
+      width: 100%;
+      min-height: 220px;
+      max-height: 55vh;
+      margin: 14px 0;
+      background: #111;
+      border-radius: 10px;
+      object-fit: cover;
+    }
+
+    button {
+      display: block;
+      width: 100%;
+      padding: 14px;
+      margin-top: 10px;
+      border: 0;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    .principal {
+      color: white;
+      background: var(--laranja);
+    }
+
+    .secundario {
+      color: var(--azul);
+      background: #e8eef6;
+    }
+
+    #mensagem {
+      padding: 12px;
+      margin-top: 14px;
+      border-radius: 8px;
+      background: #f2f4f7;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .ajuda {
+      font-size: 13px;
+      line-height: 1.5;
+      color: #555;
+    }
+
+    #codigoLido {
+      font-weight: bold;
+      overflow-wrap: anywhere;
+    }
+  </style>
+
+  <script src="https://unpkg.com/@zxing/browser@0.1.5"></script>
+</head>
+
+<body>
+  <main>
+    <header>
+      <h1>OBRAMAX</h1>
+      <p>Leitor de código de posicionamento</p>
+    </header>
+
+    <section class="conteudo">
+      <p>
+        Aponte a câmera para o código de barras ou QR Code
+        que identifica a posição do cross.
+      </p>
+
+      <video id="video" autoplay muted playsinline></video>
+
+      <button id="btnIniciar" class="principal" type="button">
+        Ativar câmera
+      </button>
+
+      <button id="btnCancelar" class="secundario" type="button">
+        Cancelar e voltar
+      </button>
+
+      <div id="mensagem" role="status" aria-live="polite">
+        Toque em “Ativar câmera” para começar.
+      </div>
+
+      <p class="ajuda">
+        Quando o código for reconhecido, ele será enviado de volta
+        ao aplicativo de abastecimento. Se a câmera não abrir,
+        confira a permissão de câmera do navegador.
+      </p>
+    </section>
+  </main>
+
+  <script>
+    const video = document.getElementById('video');
+    const mensagem = document.getElementById('mensagem');
+    const btnIniciar = document.getElementById('btnIniciar');
+    const btnCancelar = document.getElementById('btnCancelar');
+
+    let leitor = null;
+    let controles = null;
+    let iniciado = false;
+    let enviando = false;
+
+    function informar(texto) {
+      mensagem.textContent = texto;
+    }
+
+    function pararLeitura() {
+      iniciado = false;
+
+      if (controles && typeof controles.stop === 'function') {
+        controles.stop();
+      }
+
+      controles = null;
+
+      if (leitor && typeof leitor.reset === 'function') {
+        leitor.reset();
+      }
+
+      leitor = null;
+
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach(track => track.stop());
+        video.srcObject = null;
+      }
+    }
+
+    async function iniciarLeitura() {
+      if (iniciado) return;
+
+      if (!window.opener || window.opener.closed) {
+        informar(
+          'Não encontrei o aplicativo que abriu este leitor. ' +
+          'Feche esta página e toque novamente em “Ler com a câmera” ' +
+          'no aplicativo de abastecimento.'
+        );
+        return;
+      }
+
+      if (!navigator.mediaDevices ||
+          !navigator.mediaDevices.getUserMedia ||
+          !window.ZXingBrowser ||
+          !window.ZXingBrowser.BrowserMultiFormatReader) {
+        informar(
+          'A câmera ou a biblioteca de leitura não está disponível. ' +
+          'Confira a conexão e abra esta página em um navegador compatível.'
+        );
+        return;
+      }
+
+      try {
+        informar('Solicitando acesso à câmera…');
+
+        leitor = new ZXingBrowser.BrowserMultiFormatReader();
+        iniciado = true;
+
+        controles = await leitor.decodeFromVideoDevice(
+          undefined,
+          video,
+          (resultado, erro) => {
+            if (!resultado || enviando || !iniciado) return;
+
+            const codigo = String(resultado.getText() || '').trim();
+            if (!codigo) return;
+
+            enviando = true;
+            pararLeitura();
+            informar('Código identificado: ' + codigo + '. Retornando ao aplicativo…');
+
+            // O código é enviado somente à janela que abriu este leitor.
+            // O aplicativo de destino valida a origem da mensagem.
+            try {
+              window.opener.postMessage(
+                {
+                  type: 'OBRAMAX_CROSS_SCAN',
+                  code: codigo
+                },
+                '*'
+              );
+
+              // Dá um pequeno intervalo para a mensagem ser entregue.
+              setTimeout(() => window.close(), 400);
+            } catch (e) {
+              enviando = false;
+              informar(
+                'Não foi possível devolver o código. ' +
+                'Feche esta página e tente novamente.'
+              );
+            }
+          }
+        );
+
+        informar('Câmera ativa. Posicione o código dentro da imagem.');
+      } catch (erro) {
+        pararLeitura();
+        informar(
+          'Não foi possível ativar a câmera: ' +
+          (erro && erro.message ? erro.message : String(erro)) +
+          '. Verifique a permissão de câmera do navegador.'
+        );
+      }
+    }
+
+    btnIniciar.addEventListener('click', iniciarLeitura);
+
+    btnCancelar.addEventListener('click', () => {
+      pararLeitura();
+      window.close();
+
+      // Se o navegador não permitir fechar a guia, exibe uma orientação.
+      setTimeout(() => {
+        informar('Você pode fechar esta guia e retornar ao aplicativo.');
+      }, 300);
+    });
+
+    window.addEventListener('pagehide', pararLeitura);
+  </script>
+</body>
+</html>
