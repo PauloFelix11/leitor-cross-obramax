@@ -105,7 +105,9 @@
         throw new Error('Sessão de leitura ausente ou inválida. Abra o leitor pelo aplicativo de abastecimento.');
       }
       const destino = new URL(callbackApp);
-      const caminhoValido = /^\/macros\/(?:u\/\d+\/)?s\/[^/]+\/exec$/.test(destino.pathname);
+      const caminhoPadrao = /^\/macros\/(?:u\/\d+\/)?s\/[^/]+\/exec\/?$/.test(destino.pathname);
+      const caminhoWorkspace = /^\/a\/macros\/[^/]+\/s\/[^/]+\/exec\/?$/.test(destino.pathname);
+      const caminhoValido = caminhoPadrao || caminhoWorkspace;
       if (destino.protocol !== 'https:' || destino.hostname !== 'script.google.com' || !caminhoValido) {
         throw new Error('Endereço de retorno inválido. Abra o leitor pelo aplicativo de abastecimento.');
       }
