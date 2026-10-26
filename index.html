@@ -30,12 +30,12 @@
       <p>Leitor de QR Code e texto de posicionamento</p>
     </header>
     <section class="conteudo">
-      <p>Aponte a câmera traseira para o QR Code ou para o código de posição impresso (por exemplo, CRS350201A, CHK020101A ou PDO020201A). Para leitura de texto, mantenha os 10 caracteres bem iluminados, nítidos e próximos do centro da imagem.</p>
+      <p>Aponte a câmera traseira para o QR Code ou para o código de posição impresso (por exemplo, CRS350201A, CHK020101A ou PDO020201A). Para o texto impresso, mantenha os 10 caracteres inteiros dentro da faixa central, bem iluminados e em foco.</p>
       <video id="video" autoplay muted playsinline></video>
       <button id="btnIniciar" class="principal" type="button">Ativar câmera</button>
       <button id="btnCancelar" class="secundario" type="button">Cancelar e voltar</button>
       <div id="mensagem" role="status" aria-live="polite">Toque em “Ativar câmera” para começar.</div>
-      <p class="ajuda">O QR Code continua sendo a forma mais rápida. Se não houver QR visível, o leitor também tenta reconhecer o texto impresso CRS/CHK/PDO com OCR. O leitor envia o resultado ao aplicativo sem depender da comunicação entre janelas, mais confiável em alguns navegadores iOS.</p>
+      <p class="ajuda">O leitor prioriza QR Codes. Para texto impresso, ele analisa uma faixa central da imagem com OCR otimizado. O reconhecimento de texto ainda pode demorar mais que QR, mas o recorte reduz o processamento e evita analisar o fundo inteiro.</p>
     </section>
   </main>
   <script>
@@ -60,6 +60,7 @@
     let ocrOcupado = false;
     let canvasOCR = null;
     let contextoOCR = null;
+    const LANG_PATH_RAPIDO = 'https://tessdata.projectnaptha.com/4.0.0_fast';
 
     function informar(texto) {
       mensagem.textContent = texto;
@@ -183,11 +184,51 @@
       return encontrado ? encontrado[0] : null;
     }
 
+    // QR normalmente contém apenas o código. Também aceita um prefixo textual
+    // ou quebra de linha no payload, mas só devolve um código reconhecível.
+    function extrairCodigoQRCode(payload) {
+      const bruto = String(payload || '').trim().toUpperCase();
+      if (/^(CRS|CHK|PDO)[A-Z0-9]{7}$/.test(bruto)) return bruto;
+      const encontrado = bruto.match(/(?:CRS|CHK|PDO)[A-Z0-9]{7}/);
+      return encontrado ? encontrado[0] : null;
+    }
+
+    // Recorta a faixa central onde o usuário foi instruído a posicionar o texto.
+    // Um quadro menor e uma única linha são muito mais rápidos que o quadro inteiro.
+    function prepararImagemTexto() {
+      if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) return null;
+      if (!canvasOCR) {
+        canvasOCR = document.createElement('canvas');
+        contextoOCR = canvasOCR.getContext('2d', { willReadFrequently: true });
+      }
+      if (!contextoOCR) return null;
+
+      const larguraFonte = video.videoWidth;
+      const alturaFonte = video.videoHeight;
+      const recorteLargura = Math.max(1, Math.round(larguraFonte * 0.90));
+      const recorteAltura = Math.max(1, Math.round(Math.min(alturaFonte * 0.34, recorteLargura * 0.28)));
+      const origemX = Math.round((larguraFonte - recorteLargura) / 2);
+      const origemY = Math.round((alturaFonte - recorteAltura) / 2);
+      const larguraSaida = 1050;
+      const alturaSaida = Math.max(120, Math.round(recorteAltura * larguraSaida / recorteLargura));
+
+      if (canvasOCR.width !== larguraSaida || canvasOCR.height !== alturaSaida) {
+        canvasOCR.width = larguraSaida;
+        canvasOCR.height = alturaSaida;
+      }
+      try { contextoOCR.filter = 'grayscale(1) contrast(1.25)'; } catch (e) { /* filtro é opcional */ }
+      contextoOCR.drawImage(video, origemX, origemY, recorteLargura, recorteAltura,
+        0, 0, larguraSaida, alturaSaida);
+      try { contextoOCR.filter = 'none'; } catch (e) { /* filtro é opcional */ }
+      return canvasOCR;
+    }
+
     async function iniciarLeituraTextoNativa() {
       if (!iniciado || enviando || modoTexto !== 'native' || !detectorTexto) return;
-      if (video.readyState >= 2) {
+      const imagemTexto = prepararImagemTexto();
+      if (imagemTexto) {
         try {
-          const resultados = await detectorTexto.detect(video);
+          const resultados = await detectorTexto.detect(imagemTexto);
           if (!iniciado || enviando || modoTexto !== 'native') return;
           for (const item of (resultados || [])) {
             const codigo = identificarCodigo(item.rawValue || item.text || '');
@@ -201,7 +242,7 @@
         }
       }
       if (iniciado && !enviando && modoTexto === 'native') {
-        temporizadorTexto = setTimeout(iniciarLeituraTextoNativa, 600);
+        temporizadorTexto = setTimeout(iniciarLeituraTextoNativa, 400);
       }
     }
 
@@ -232,7 +273,7 @@
       try {
         await carregarScriptTesseract();
         if (!iniciado || enviando) return;
-        const worker = await window.Tesseract.createWorker('eng', 1);
+        const worker = await window.Tesseract.createWorker('eng', 1, { langPath: LANG_PATH_RAPIDO });
         if (!iniciado || enviando) {
           await worker.terminate();
           return;
@@ -240,12 +281,13 @@
         workerOCR = worker;
         await workerOCR.setParameters({
           tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789',
-          tessedit_pageseg_mode: '11'
+          tessedit_pageseg_mode: '7',
+          user_defined_dpi: '200'
         });
         if (!iniciado || enviando) return;
         modoTexto = 'tesseract';
         informar('Leitura ativa: QR Code rápido e reconhecimento do texto CRS/CHK/PDO. Mantenha o código impresso no centro e em foco.');
-        agendarOCR(700);
+        agendarOCR(250);
       } catch (e) {
         modoTexto = 'off';
         if (iniciado && !enviando) {
@@ -263,24 +305,16 @@
 
     async function tentarOCR() {
       if (!iniciado || enviando || modoTexto !== 'tesseract' || !workerOCR || ocrOcupado) return;
-      if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) {
-        agendarOCR(900);
+      const imagemTexto = prepararImagemTexto();
+      if (!imagemTexto) {
+        agendarOCR(400);
         return;
       }
       ocrOcupado = true;
       try {
-        // Canvas reduzido limita o trabalho da OCR; QR decoder segue funcionando
-        // de forma independente e com a cadência rápida definida na biblioteca ZXing.
-        if (!canvasOCR) {
-          canvasOCR = document.createElement('canvas');
-          contextoOCR = canvasOCR.getContext('2d', { willReadFrequently: true });
-        }
-        const largura = 800;
-        const altura = Math.max(1, Math.round(video.videoHeight * largura / video.videoWidth));
-        canvasOCR.width = largura;
-        canvasOCR.height = altura;
-        contextoOCR.drawImage(video, 0, 0, largura, altura);
-        const resultado = await workerOCR.recognize(canvasOCR);
+        // O worker recebe apenas a região que contém uma linha de texto, não o
+        // quadro inteiro; isso reduz custo e melhora a separação dos caracteres.
+        const resultado = await workerOCR.recognize(imagemTexto);
         if (!iniciado || enviando || modoTexto !== 'tesseract') return;
         const dados = resultado && resultado.data ? resultado.data : {};
         const codigo = identificarCodigo(dados.text || '');
@@ -293,7 +327,7 @@
         // A tentativa seguinte continua; não interrompe o leitor de QR.
       } finally {
         ocrOcupado = false;
-        if (iniciado && !enviando && modoTexto === 'tesseract') agendarOCR(900);
+        if (iniciado && !enviando && modoTexto === 'tesseract') agendarOCR(250);
       }
     }
 
@@ -313,7 +347,7 @@
               detectorTexto = null;
               iniciarOCRFallback();
             }
-          }, 4000);
+          }, 1800);
           informar('QR ativo. Procurando também o texto impresso; mantenha os caracteres no centro e em foco.');
         } catch (e) {
           detectorTexto = null;
@@ -321,7 +355,26 @@
         }
       } else {
         // Deixa o QR ter uma chance primeiro; o OCR pesado é carregado sob demanda.
-        temporizadorFallback = setTimeout(iniciarOCRFallback, 1100);
+        temporizadorFallback = setTimeout(iniciarOCRFallback, 350);
+      }
+    }
+
+    async function solicitarFocoContinuo() {
+      try {
+        const stream = video.srcObject;
+        const trilha = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+        if (!trilha || typeof trilha.getCapabilities !== 'function' || typeof trilha.applyConstraints !== 'function') return;
+        const capacidades = trilha.getCapabilities();
+        const avancadas = [];
+        if (Array.isArray(capacidades.focusMode) && capacidades.focusMode.includes('continuous')) {
+          avancadas.push({ focusMode: 'continuous' });
+        }
+        if (Array.isArray(capacidades.exposureMode) && capacidades.exposureMode.includes('continuous')) {
+          avancadas.push({ exposureMode: 'continuous' });
+        }
+        if (avancadas.length) await trilha.applyConstraints({ advanced: avancadas });
+      } catch (e) {
+        // Alguns navegadores, inclusive versões do iOS, não expõem foco manual.
       }
     }
 
@@ -344,8 +397,9 @@
       try {
         informar('Solicitando acesso à câmera…');
         leitor = new ZXingBrowser.BrowserQRCodeReader(undefined, {
-          delayBetweenScanAttempts: 150,
-          delayBetweenScanSuccess: 150,
+          // 200 ms mantém até 5 tentativas/s e deixa processamento livre para o OCR.
+          delayBetweenScanAttempts: 200,
+          delayBetweenScanSuccess: 250,
           tryPlayVideoTimeout: 5000
         });
         iniciado = true;
@@ -359,13 +413,22 @@
           }
         }, video, (resultado, erro) => {
           if (!resultado || enviando || !iniciado) return;
-          const codigo = String(resultado.getText() || '').trim();
-          if (!codigo) return;
+          const payload = String(resultado.getText() || '').trim();
+          if (!payload) return;
+          const codigo = extrairCodigoQRCode(payload);
+          if (!codigo) {
+            informar('QR Code detectado, mas o conteúdo não contém uma posição CRS/CHK/PDO válida. Confira se a etiqueta corresponde a uma posição do cross.');
+            return;
+          }
           enviarCodigo(codigo, 'qr');
         });
 
         if (iniciado && !enviando) {
-          informar('Câmera ativa. Leia um QR Code ou mantenha o código impresso CRS/CHK/PDO no centro da imagem.');
+          // Pede foco/exposição contínuos quando o navegador expõe esses controles;
+          // em dispositivos sem suporte, mantém o foco automático padrão.
+          await solicitarFocoContinuo();
+          if (!iniciado || enviando) return;
+          informar('Câmera ativa. QR Code priorizado; para texto, centralize os 10 caracteres na faixa da imagem.');
           iniciarReconhecimentoTexto();
         }
       } catch (erro) {
