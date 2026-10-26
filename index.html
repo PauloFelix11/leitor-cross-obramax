@@ -35,7 +35,7 @@
       <button id="btnIniciar" class="principal" type="button">Ativar câmera</button>
       <button id="btnCancelar" class="secundario" type="button">Cancelar e voltar</button>
       <div id="mensagem" role="status" aria-live="polite">Toque em “Ativar câmera” para começar.</div>
-      <p class="ajuda">O QR Code continua sendo a forma mais rápida. Se não houver QR visível, o leitor também tenta reconhecer o texto impresso CRS/CHK/PDO com OCR. O reconhecimento de texto pode demorar mais que o QR; mantenha o código inteiro e em foco.</p>
+      <p class="ajuda">O QR Code continua sendo a forma mais rápida. Se não houver QR visível, o leitor também tenta reconhecer o texto impresso CRS/CHK/PDO com OCR. O leitor envia o resultado ao aplicativo sem depender da comunicação entre janelas, mais confiável em alguns navegadores iOS.</p>
     </section>
   </main>
   <script>
@@ -96,19 +96,45 @@
       }
     }
 
+    const parametrosLeitor = new URLSearchParams(window.location.search);
+    const tokenLeitor = String(parametrosLeitor.get('token') || '').trim().toUpperCase();
+    const callbackApp = String(parametrosLeitor.get('callback') || '').trim();
+
+    function construirUrlRetorno(codigo) {
+      if (!/^[A-F0-9]{32}$/.test(tokenLeitor)) {
+        throw new Error('Sessão de leitura ausente ou inválida. Abra o leitor pelo aplicativo de abastecimento.');
+      }
+      const destino = new URL(callbackApp);
+      const caminhoValido = /^\/macros\/(?:u\/\d+\/)?s\/[^/]+\/exec$/.test(destino.pathname);
+      if (destino.protocol !== 'https:' || destino.hostname !== 'script.google.com' || !caminhoValido) {
+        throw new Error('Endereço de retorno inválido. Abra o leitor pelo aplicativo de abastecimento.');
+      }
+      if (!/^(CRS|CHK|PDO)[A-Z0-9]{7}$/.test(String(codigo || '').toUpperCase())) {
+        throw new Error('O código lido não tem o formato esperado de uma posição.');
+      }
+      destino.search = '';
+      destino.hash = '';
+      destino.searchParams.set('acao', 'receberLeitura');
+      destino.searchParams.set('token', tokenLeitor);
+      destino.searchParams.set('codigo', String(codigo).toUpperCase());
+      return destino.toString();
+    }
+
     function enviarCodigo(codigo, origem) {
       if (!codigo || enviando || !iniciado) return;
+      let urlRetorno;
+      try {
+        urlRetorno = construirUrlRetorno(String(codigo).trim().toUpperCase());
+      } catch (e) {
+        informar(e && e.message ? e.message : 'Não foi possível preparar o retorno ao aplicativo.');
+        return;
+      }
       enviando = true;
       pararLeitura();
-      informar((origem === 'texto' ? 'Código impresso identificado: ' : 'QR Code identificado: ') + codigo + '. Retornando ao aplicativo…');
-      try {
-        // Mantém exatamente o contrato de mensagem já usado pelo app principal.
-        window.opener.postMessage({ type: 'OBRAMAX_CROSS_SCAN', code: codigo }, '*');
-        setTimeout(() => window.close(), 400);
-      } catch (e) {
-        enviando = false;
-        informar('Não foi possível devolver o código. Feche esta página e tente novamente.');
-      }
+      informar((origem === 'texto' ? 'Código impresso identificado: ' : 'QR Code identificado: ') + codigo + '. Enviando ao aplicativo…');
+      // Retorno via URL ao endpoint Apps Script: funciona mesmo quando o iOS
+      // remove window.opener em popups abertos a partir de iframes.
+      window.location.replace(urlRetorno);
     }
 
     function identificarCodigo(texto) {
@@ -299,8 +325,11 @@
 
     async function iniciarLeitura() {
       if (iniciado) return;
-      if (!window.opener || window.opener.closed) {
-        informar('Não encontrei o aplicativo que abriu este leitor. Feche esta página e toque novamente em “Ler com a câmera” no aplicativo de abastecimento.');
+      try {
+        // Valida desde o início os parâmetros da sessão; não depende de opener.
+        construirUrlRetorno('CRS000000A');
+      } catch (e) {
+        informar(e && e.message ? e.message : 'Sessão inválida. Abra o leitor pelo aplicativo de abastecimento.');
         return;
       }
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia ||
