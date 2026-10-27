@@ -109,10 +109,10 @@
       if (window.ZXingBrowser && window.ZXingBrowser.BrowserQRCodeReader) return;
       if (carregandoZXing) return carregandoZXing;
       carregandoZXing = (async () => {
-        const cdns = [
-          'https://unpkg.com/@zxing/browser@0.1.5',
-          'https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js'
-        ];
+       const cdns = [
+  'https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js',
+  'https://cdn.jsdelivr.net/npm/@zxing/browser@0.2.1/umd/zxing-browser.min.js'
+];
         let ultimoErro = null;
         for (const url of cdns) {
           try {
