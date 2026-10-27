@@ -14,14 +14,14 @@
     header h1 { margin:0 0 7px; font-size:22px; }
     header p { margin:0; font-size:14px; }
     .conteudo { padding:20px; }
-    video { display:block; width:100%; height:56vh; min-height:300px; max-height:65vh; margin:14px 0; background:#111; border-radius:10px; object-fit:contain; }
+    video { display:block; width:100%; height:40vh; min-height:220px; max-height:55vh; margin:14px 0; background:#111; border-radius:10px; object-fit:contain; }
     button { display:block; width:100%; padding:14px; margin-top:10px; border:0; border-radius:8px; font-size:16px; font-weight:bold; cursor:pointer; }
     .principal { color:white; background:var(--laranja); }
     .secundario { color:var(--azul); background:#e8eef6; }
-    button:disabled { opacity:.55; cursor:not-allowed; }
     #mensagem { padding:12px; margin-top:14px; border-radius:8px; background:#f2f4f7; line-height:1.45; overflow-wrap:anywhere; }
     .ajuda { font-size:13px; line-height:1.5; color:#555; }
   </style>
+  <script src="https://unpkg.com/@zxing/browser@0.1.5"></script>
 </head>
 <body>
   <main>
@@ -30,43 +30,24 @@
       <p>Leitor de QR Code e texto de posicionamento</p>
     </header>
     <section class="conteudo">
-      <p>Aponte a câmera traseira para a etiqueta. O leitor procura o QR Code na imagem inteira — ele pode estar abaixo ou ao lado do centro, como nos cestos. Para o texto impresso (CRS350201A, CHK020101A ou PDO020201A), mantenha a linha inteira visível, bem iluminada e em foco.</p>
+      <p>Aponte a câmera traseira para o QR Code ou para o código de posição impresso (por exemplo, CRS350201A, CHK020101A ou PDO020201A). Para o texto impresso, mantenha os 10 caracteres inteiros dentro da faixa central, bem iluminados e em foco.</p>
       <video id="video" autoplay muted playsinline></video>
       <button id="btnIniciar" class="principal" type="button">Ativar câmera</button>
-      <button id="btnReiniciar" class="secundario" type="button" disabled>Reiniciar câmera</button>
       <button id="btnCancelar" class="secundario" type="button">Cancelar e voltar</button>
       <div id="mensagem" role="status" aria-live="polite">Toque em “Ativar câmera” para começar.</div>
-      <p class="ajuda">O QR Code é procurado em toda a imagem. Se não for encontrado rapidamente, o leitor tenta regiões ampliadas de diferentes alturas e lados, o que ajuda nas etiquetas dos cestos. O texto CRS/CHK/PDO é reconhecido como alternativa. Se a câmera congelar, o leitor tenta recuperar o vídeo automaticamente.</p>
+      <p class="ajuda">O leitor prioriza QR Codes. Para texto impresso, ele analisa uma faixa central da imagem com OCR otimizado. O reconhecimento de texto ainda pode demorar mais que QR, mas o recorte reduz o processamento e evita analisar o fundo inteiro.</p>
     </section>
   </main>
   <script>
     const video = document.getElementById('video');
     const mensagem = document.getElementById('mensagem');
     const btnIniciar = document.getElementById('btnIniciar');
-    const btnReiniciar = document.getElementById('btnReiniciar');
     const btnCancelar = document.getElementById('btnCancelar');
 
     let leitor = null;
     let controles = null;
     let iniciado = false;
     let enviando = false;
-    // Vigilância da câmera: iOS/WebKit pode manter a trilha "live" enquanto
-    // o elemento de vídeo deixa de receber quadros após suspensão/retorno.
-    let temporizadorVigilancia = null;
-    let inicioLeituraTs = 0;
-    let ultimoTempoVideo = -1;
-    let ultimaHoraQuadro = 0;
-    let ultimaCallbackQR = 0;
-    let recuperandoCamera = false;
-    let recuperacoesRecentes = [];
-    let verificandoCamera = false;
-    let retomarAoVoltar = false;
-    let avisoSemLeituraMostrado = false;
-    let canvasDiagnostico = null;
-    let contextoDiagnostico = null;
-    let ultimaAssinaturaQuadro = null;
-    let repeticoesImagemSemMudanca = 0;
-    let quadrosPretosSeguidos = 0;
 
     // Reconhecimento auxiliar de texto: só aceita códigos de 10 caracteres
     // iniciados por CRS, CHK ou PDO; o QR continua no seu fluxo rápido separado.
@@ -80,51 +61,6 @@
     let canvasOCR = null;
     let contextoOCR = null;
     const LANG_PATH_RAPIDO = 'https://tessdata.projectnaptha.com/4.0.0_fast';
-    let carregandoZXing = null;
-    // Leitor de apoio: só entra em ação quando a procura rápida no quadro inteiro não encontra o QR.
-    let leitorRecortes = null;
-    let temporizadorQRRecortado = null;
-    let qrRecorteOcupado = false;
-    let indiceZonaQR = 0;
-    let canvasQRRecorte = null;
-    let contextoQRRecorte = null;
-    const ZONAS_QR = [
-      // Zonas sobrepostas cobrem centro, lados e a região inferior das etiquetas de cesto.
-      { x: 0.02, y: 0.18, w: 0.76, h: 0.68 },
-      { x: 0.22, y: 0.18, w: 0.76, h: 0.68 },
-      { x: 0.02, y: 0.02, w: 0.76, h: 0.68 },
-      { x: 0.22, y: 0.02, w: 0.76, h: 0.68 }
-    ];
-    function carregarScriptExterno(url) {
-      return new Promise((resolve, reject) => {
-        const script = document.createElement('script');
-        script.src = url;
-        script.async = true;
-        script.onload = resolve;
-        script.onerror = () => { script.remove(); reject(new Error('Falha ao carregar ' + url)); };
-        document.head.appendChild(script);
-      });
-    }
-    async function garantirZXing() {
-      if (window.ZXingBrowser && window.ZXingBrowser.BrowserQRCodeReader) return;
-      if (carregandoZXing) return carregandoZXing;
-      carregandoZXing = (async () => {
-       const cdns = [
-  'https://unpkg.com/@zxing/browser@0.2.1/umd/zxing-browser.min.js',
-  'https://cdn.jsdelivr.net/npm/@zxing/browser@0.2.1/umd/zxing-browser.min.js'
-];
-        let ultimoErro = null;
-        for (const url of cdns) {
-          try {
-            await carregarScriptExterno(url);
-            if (window.ZXingBrowser && window.ZXingBrowser.BrowserQRCodeReader) return;
-            throw new Error('A biblioteca carregou sem disponibilizar o leitor QR.');
-          } catch (e) { ultimoErro = e; }
-        }
-        throw ultimoErro || new Error('Não foi possível carregar a biblioteca de QR Code.');
-      })();
-      try { await carregandoZXing; } finally { carregandoZXing = null; }
-    }
 
     function informar(texto) {
       mensagem.textContent = texto;
@@ -146,11 +82,6 @@
 
     function pararLeitura() {
       iniciado = false;
-      if (temporizadorVigilancia) clearTimeout(temporizadorVigilancia);
-      temporizadorVigilancia = null;
-      if (temporizadorQRRecortado) clearTimeout(temporizadorQRRecortado);
-      temporizadorQRRecortado = null;
-      qrRecorteOcupado = false;
       limparTarefasTexto();
       if (controles && typeof controles.stop === 'function') {
         try { controles.stop(); } catch (e) { /* encerramento defensivo */ }
@@ -160,13 +91,10 @@
         try { leitor.reset(); } catch (e) { /* limpeza defensiva */ }
       }
       leitor = null;
-      leitorRecortes = null;
       if (video.srcObject) {
-        try { video.srcObject.getTracks().forEach(track => track.stop()); } catch (e) { /* encerramento defensivo */ }
+        video.srcObject.getTracks().forEach(track => track.stop());
         video.srcObject = null;
       }
-      btnIniciar.disabled = false;
-      btnReiniciar.disabled = true;
     }
 
     const parametrosLeitor = new URLSearchParams(window.location.search);
@@ -277,14 +205,12 @@
 
       const larguraFonte = video.videoWidth;
       const alturaFonte = video.videoHeight;
-      // Nas etiquetas de cesto das fotos, o texto fica acima do QR (aprox. 25–35% da altura).
-      // Esta faixa larga cobre 12–60% da imagem, em vez de cortar o texto no topo.
-      const recorteLargura = Math.max(1, Math.round(larguraFonte * 0.96));
-      const recorteAltura = Math.max(1, Math.round(alturaFonte * 0.48));
+      const recorteLargura = Math.max(1, Math.round(larguraFonte * 0.90));
+      const recorteAltura = Math.max(1, Math.round(Math.min(alturaFonte * 0.34, recorteLargura * 0.28)));
       const origemX = Math.round((larguraFonte - recorteLargura) / 2);
-      const origemY = Math.max(0, Math.min(alturaFonte - recorteAltura, Math.round(alturaFonte * 0.12)));
-      const larguraSaida = 1000;
-      const alturaSaida = Math.max(180, Math.round(recorteAltura * larguraSaida / recorteLargura));
+      const origemY = Math.round((alturaFonte - recorteAltura) / 2);
+      const larguraSaida = 1050;
+      const alturaSaida = Math.max(120, Math.round(recorteAltura * larguraSaida / recorteLargura));
 
       if (canvasOCR.width !== larguraSaida || canvasOCR.height !== alturaSaida) {
         canvasOCR.width = larguraSaida;
@@ -316,7 +242,7 @@
         }
       }
       if (iniciado && !enviando && modoTexto === 'native') {
-        temporizadorTexto = setTimeout(iniciarLeituraTextoNativa, 650);
+        temporizadorTexto = setTimeout(iniciarLeituraTextoNativa, 400);
       }
     }
 
@@ -343,7 +269,7 @@
       if (!iniciado || enviando || carregandoOCR || workerOCR) return;
       carregandoOCR = true;
       modoTexto = 'tesseract-loading';
-      informar('QR ativo. Depois da busca ampliada por QR, preparando a leitura do texto impresso…');
+      informar('QR ativo. Preparando leitura do texto impresso…');
       try {
         await carregarScriptTesseract();
         if (!iniciado || enviando) return;
@@ -360,8 +286,8 @@
         });
         if (!iniciado || enviando) return;
         modoTexto = 'tesseract';
-        informar('Leitura ativa: QR Code com busca ampliada e reconhecimento do texto CRS/CHK/PDO. Mantenha a etiqueta inteira visível e em foco.');
-        agendarOCR(800);
+        informar('Leitura ativa: QR Code rápido e reconhecimento do texto CRS/CHK/PDO. Mantenha o código impresso no centro e em foco.');
+        agendarOCR(250);
       } catch (e) {
         modoTexto = 'off';
         if (iniciado && !enviando) {
@@ -401,7 +327,7 @@
         // A tentativa seguinte continua; não interrompe o leitor de QR.
       } finally {
         ocrOcupado = false;
-        if (iniciado && !enviando && modoTexto === 'tesseract') agendarOCR(800);
+        if (iniciado && !enviando && modoTexto === 'tesseract') agendarOCR(250);
       }
     }
 
@@ -412,7 +338,7 @@
         try {
           detectorTexto = new window.TextDetector();
           modoTexto = 'native';
-          temporizadorTexto = setTimeout(iniciarLeituraTextoNativa, 1600);
+          temporizadorTexto = setTimeout(iniciarLeituraTextoNativa, 250);
           temporizadorFallback = setTimeout(() => {
             if (iniciado && !enviando && modoTexto === 'native') {
               if (temporizadorTexto) clearTimeout(temporizadorTexto);
@@ -421,88 +347,16 @@
               detectorTexto = null;
               iniciarOCRFallback();
             }
-          }, 7500);
-          informar('QR ativo. Procurando também o texto impresso; mantenha a linha inteira visível e em foco.');
+          }, 1800);
+          informar('QR ativo. Procurando também o texto impresso; mantenha os caracteres no centro e em foco.');
         } catch (e) {
           detectorTexto = null;
           iniciarOCRFallback();
         }
       } else {
         // Deixa o QR ter uma chance primeiro; o OCR pesado é carregado sob demanda.
-        temporizadorFallback = setTimeout(iniciarOCRFallback, 6000);
+        temporizadorFallback = setTimeout(iniciarOCRFallback, 350);
       }
-    }
-
-    function criarDicasQRMaisRobustas() {
-      // No pacote UMD 0.1.5, DecodeHintType nem sempre é exportado globalmente;
-      // TRY_HARDER é a quarta entrada do enum do @zxing/library (índice 3).
-      const dicas = new Map();
-      const enumHints = window.ZXingBrowser && window.ZXingBrowser.DecodeHintType;
-      const tryHarder = enumHints && enumHints.TRY_HARDER !== undefined ? enumHints.TRY_HARDER : 3;
-      dicas.set(tryHarder, true);
-      return dicas;
-    }
-
-    function desenharZonaQRRecortada() {
-      if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) return null;
-      if (!canvasQRRecorte) {
-        canvasQRRecorte = document.createElement('canvas');
-        contextoQRRecorte = canvasQRRecorte.getContext('2d', { willReadFrequently: true });
-      }
-      if (!contextoQRRecorte) return null;
-
-      const w = video.videoWidth;
-      const h = video.videoHeight;
-      const zona = ZONAS_QR[indiceZonaQR % ZONAS_QR.length];
-      indiceZonaQR = (indiceZonaQR + 1) % ZONAS_QR.length;
-      const sx = Math.max(0, Math.round(w * zona.x));
-      const sy = Math.max(0, Math.round(h * zona.y));
-      const sw = Math.max(1, Math.min(w - sx, Math.round(w * zona.w)));
-      const sh = Math.max(1, Math.min(h - sy, Math.round(h * zona.h)));
-      // Amplia a região antes da tentativa auxiliar. O QR principal continua a ser
-      // procurado no quadro completo, sem qualquer limitação de posição.
-      const escala = Math.min(1.55, 1900 / Math.max(sw, sh));
-      const dw = Math.max(1, Math.round(sw * escala));
-      const dh = Math.max(1, Math.round(sh * escala));
-      if (canvasQRRecorte.width !== dw || canvasQRRecorte.height !== dh) {
-        canvasQRRecorte.width = dw;
-        canvasQRRecorte.height = dh;
-      }
-      contextoQRRecorte.imageSmoothingEnabled = false;
-      contextoQRRecorte.drawImage(video, sx, sy, sw, sh, 0, 0, dw, dh);
-      return canvasQRRecorte;
-    }
-
-    function agendarBuscaQRRecortada(atraso = 1700) {
-      if (temporizadorQRRecortado) clearTimeout(temporizadorQRRecortado);
-      if (iniciado && !enviando) temporizadorQRRecortado = setTimeout(tentarQRRecortado, atraso);
-    }
-
-    function tentarQRRecortado() {
-      temporizadorQRRecortado = null;
-      if (!iniciado || enviando || !leitorRecortes || qrRecorteOcupado) return;
-      const imagem = desenharZonaQRRecortada();
-      if (!imagem) {
-        agendarBuscaQRRecortada(500);
-        return;
-      }
-      qrRecorteOcupado = true;
-      try {
-        // TRY_HARDER roda apenas sobre um recorte, nunca sobre toda a câmera,
-        // para melhorar etiquetas pequenas/fora do centro sem penalizar o ciclo rápido.
-        const resultado = leitorRecortes.decodeFromCanvas(imagem);
-        const payload = resultado && typeof resultado.getText === 'function' ? resultado.getText() : '';
-        const codigo = extrairCodigoQRCode(payload);
-        if (codigo) {
-          enviarCodigo(codigo, 'qr');
-          return;
-        }
-      } catch (e) {
-        // QR não localizado na zona atual é normal; avançar para a próxima região.
-      } finally {
-        qrRecorteOcupado = false;
-      }
-      if (iniciado && !enviando) agendarBuscaQRRecortada(520);
     }
 
     async function solicitarFocoContinuo() {
@@ -524,182 +378,6 @@
       }
     }
 
-    const esperar = ms => new Promise(resolve => setTimeout(resolve, ms));
-
-    function iniciarVigilanciaCamera() {
-      if (temporizadorVigilancia) clearTimeout(temporizadorVigilancia);
-      inicioLeituraTs = Date.now();
-      ultimoTempoVideo = Number(video.currentTime || 0);
-      ultimaHoraQuadro = Date.now();
-      ultimaCallbackQR = Date.now();
-      avisoSemLeituraMostrado = false;
-      ultimaAssinaturaQuadro = null;
-      repeticoesImagemSemMudanca = 0;
-      quadrosPretosSeguidos = 0;
-      temporizadorVigilancia = setTimeout(verificarSaudeCamera, 2500);
-    }
-
-    function agendarVigilanciaCamera(ms = 2500) {
-      if (temporizadorVigilancia) clearTimeout(temporizadorVigilancia);
-      if (iniciado && !enviando) temporizadorVigilancia = setTimeout(verificarSaudeCamera, ms);
-    }
-
-    function medirImagemDaCamera() {
-      if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) return null;
-      try {
-        if (!canvasDiagnostico) {
-          canvasDiagnostico = document.createElement('canvas');
-          canvasDiagnostico.width = 24;
-          canvasDiagnostico.height = 16;
-          contextoDiagnostico = canvasDiagnostico.getContext('2d', { willReadFrequently: true });
-        }
-        if (!contextoDiagnostico) return null;
-        contextoDiagnostico.drawImage(video, 0, 0, 24, 16);
-        const dados = contextoDiagnostico.getImageData(0, 0, 24, 16).data;
-        let assinatura = 2166136261;
-        let somaLuminancia = 0;
-        for (let i = 0; i < dados.length; i += 4) {
-          // Hash leve de uma amostra pequena, sem gravar nem transmitir imagens.
-          assinatura ^= dados[i]; assinatura = Math.imul(assinatura, 16777619);
-          assinatura ^= dados[i + 1]; assinatura = Math.imul(assinatura, 16777619);
-          assinatura ^= dados[i + 2]; assinatura = Math.imul(assinatura, 16777619);
-          somaLuminancia += (dados[i] + dados[i + 1] + dados[i + 2]) / 3;
-        }
-        return {
-          assinatura: (assinatura >>> 0).toString(16),
-          luminanciaMedia: somaLuminancia / (24 * 16)
-        };
-      } catch (e) {
-        // A análise de pixels é somente um diagnóstico auxiliar; nunca bloqueia o leitor.
-        return null;
-      }
-    }
-
-    async function verificarSaudeCamera() {
-      temporizadorVigilancia = null;
-      if (!iniciado || enviando || verificandoCamera) return;
-      verificandoCamera = true;
-      try {
-        const agora = Date.now();
-        const stream = video.srcObject;
-        const trilha = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
-        const quadroDisponivel = video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0;
-        const tempoAtual = Number(video.currentTime || 0);
-
-        if (trilha && trilha.readyState === 'ended') {
-          await recuperarCamera('A câmera foi encerrada pelo navegador');
-          return;
-        }
-        if (quadroDisponivel && tempoAtual > ultimoTempoVideo + 0.02) {
-          ultimoTempoVideo = tempoAtual;
-          ultimaHoraQuadro = agora;
-        }
-
-        // Detecta também o caso WebKit em que currentTime avança, mas a camada de
-        // vídeo continua exibindo um quadro congelado/preto. Só usa uma amostra
-        // minúscula (24x16) local; nenhum quadro ou dado de imagem é enviado.
-        const amostra = quadroDisponivel ? medirImagemDaCamera() : null;
-        if (amostra) {
-          if (amostra.assinatura === ultimaAssinaturaQuadro) repeticoesImagemSemMudanca++;
-          else repeticoesImagemSemMudanca = 0;
-          ultimaAssinaturaQuadro = amostra.assinatura;
-          if (amostra.luminanciaMedia < 2.5) quadrosPretosSeguidos++;
-          else quadrosPretosSeguidos = 0;
-        }
-
-        const passouTempoInicial = agora - inicioLeituraTs > 10000;
-        const videoParado = passouTempoInicial && (!quadroDisponivel || agora - ultimaHoraQuadro > 7500);
-        const imagemCongelada = passouTempoInicial && repeticoesImagemSemMudanca >= 3;
-        const imagemPreta = passouTempoInicial && quadrosPretosSeguidos >= 3;
-        const leitorParado = agora - inicioLeituraTs > 15000 && agora - ultimaCallbackQR > 10000;
-        if (videoParado || imagemCongelada || imagemPreta || leitorParado || (trilha && trilha.muted && passouTempoInicial && agora - ultimaHoraQuadro > 4000)) {
-          const motivo = videoParado ? 'A imagem da câmera parou de atualizar' :
-            (imagemPreta ? 'A câmera está enviando uma imagem preta' :
-            (imagemCongelada ? 'A imagem da câmera parece congelada' : 'O leitor QR parou de responder'));
-          await recuperarCamera(motivo);
-          return;
-        }
-
-        // Se os quadros chegam, o defeito não é perda do stream; mostrar orientação
-        // em vez de reiniciar à toa quando o código está muito pequeno/fora da faixa.
-        if (!avisoSemLeituraMostrado && agora - inicioLeituraTs > 30000 && quadroDisponivel) {
-          avisoSemLeituraMostrado = true;
-          if (!enviando && modoTexto !== 'tesseract-loading') {
-            informar('A câmera está recebendo imagem, mas ainda não reconheceu o código. Aponte para a etiqueta inteira e aproxime até o QR ficar maior; ele não precisa ficar exatamente no centro. Se a imagem estiver congelada, toque em “Reiniciar câmera”.');
-          }
-        }
-      } catch (e) {
-        // O monitor não deve interromper o leitor por uma falha de diagnóstico.
-      } finally {
-        verificandoCamera = false;
-        agendarVigilanciaCamera(2500);
-      }
-    }
-
-    async function recuperarCamera(motivo) {
-      if (!iniciado || enviando || recuperandoCamera) return;
-      const agora = Date.now();
-      recuperacoesRecentes = recuperacoesRecentes.filter(ts => agora - ts < 90000);
-      if (recuperacoesRecentes.length >= 2) {
-        informar(motivo + '. O leitor tentou recuperar a câmera automaticamente duas vezes. Toque em “Reiniciar câmera”.');
-        btnReiniciar.disabled = false;
-        return;
-      }
-      recuperacoesRecentes.push(agora);
-      recuperandoCamera = true;
-      try {
-        informar(motivo + '. Tentando recuperar a imagem da câmera…');
-        const stream = video.srcObject;
-        const trilha = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
-        if (stream && trilha && trilha.readyState === 'live') {
-          // Workaround para o bug de vídeo preto/congelado observado no WebKit/iOS:
-          // desanexa e reanexa o mesmo MediaStream ao elemento de vídeo.
-          const tempoAntes = Number(video.currentTime || 0);
-          video.srcObject = null;
-          await esperar(120);
-          video.srcObject = stream;
-          try { await video.play(); } catch (e) { /* nova tentativa completa abaixo */ }
-          await esperar(1400);
-          if (video.readyState >= 2 && video.videoWidth > 0 && Number(video.currentTime || 0) > tempoAntes + 0.05) {
-            ultimoTempoVideo = Number(video.currentTime || 0);
-            ultimaHoraQuadro = Date.now();
-            ultimaCallbackQR = Date.now();
-            ultimoTempoVideo = Number(video.currentTime || 0);
-            ultimaAssinaturaQuadro = null;
-            repeticoesImagemSemMudanca = 0;
-            quadrosPretosSeguidos = 0;
-            informar('Imagem da câmera recuperada. Continue apontando para o QR Code ou texto.');
-            return;
-          }
-        }
-
-        // Se o detach/reattach não resolveu, encerra o stream antigo e abre um novo.
-        informar('A imagem ainda não voltou. Reiniciando a câmera por completo…');
-        pararLeitura();
-        await esperar(350);
-        await iniciarLeitura();
-      } catch (e) {
-        informar('Não consegui recuperar a câmera automaticamente. Toque em “Reiniciar câmera” ou feche e reabra a guia. ' + (e && e.message ? e.message : ''));
-        btnReiniciar.disabled = false;
-      } finally {
-        recuperandoCamera = false;
-      }
-    }
-
-    async function reiniciarManualmente() {
-      if (recuperandoCamera || enviando) return;
-      recuperacoesRecentes = [];
-      recuperandoCamera = true;
-      try {
-        informar('Reiniciando a câmera…');
-        pararLeitura();
-        await esperar(350);
-        await iniciarLeitura();
-      } finally {
-        recuperandoCamera = false;
-      }
-    }
-
     async function iniciarLeitura() {
       if (iniciado) return;
       try {
@@ -709,44 +387,31 @@
         informar(e && e.message ? e.message : 'Sessão inválida. Abra o leitor pelo aplicativo de abastecimento.');
         return;
       }
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        informar('Este navegador não disponibilizou acesso à câmera. Abra o leitor em uma guia HTTPS normal e confira as permissões de câmera.');
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia ||
+          !window.ZXingBrowser || !window.ZXingBrowser.BrowserQRCodeReader) {
+        informar('A câmera ou a biblioteca de QR Code não está disponível. Confira a conexão e abra esta página em um navegador compatível.');
         return;
       }
 
       enviando = false;
-      btnIniciar.disabled = true;
       try {
-        informar('Preparando o leitor QR…');
-        await garantirZXing();
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('A câmera deixou de estar disponível.');
         informar('Solicitando acesso à câmera…');
         leitor = new ZXingBrowser.BrowserQRCodeReader(undefined, {
-          // Busca rápida no quadro inteiro; o leitor auxiliar tenta recortes com mais esforço.
-          delayBetweenScanAttempts: 240,
+          // 200 ms mantém até 5 tentativas/s e deixa processamento livre para o OCR.
+          delayBetweenScanAttempts: 200,
           delayBetweenScanSuccess: 250,
-          tryPlayVideoTimeout: 5000
-        });
-        leitorRecortes = new ZXingBrowser.BrowserQRCodeReader(criarDicasQRMaisRobustas(), {
-          delayBetweenScanAttempts: 300,
-          delayBetweenScanSuccess: 300,
           tryPlayVideoTimeout: 5000
         });
         iniciado = true;
 
-        ultimaCallbackQR = Date.now();
         controles = await leitor.decodeFromConstraints({
           audio: false,
           video: {
             facingMode: { ideal: 'environment' },
-            width: { ideal: 1920 },
-            height: { ideal: 1080 },
-            frameRate: { ideal: 24, max: 30 }
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
           }
         }, video, (resultado, erro) => {
-          // O callback também é acionado nas tentativas sem correspondência; serve
-          // como pulso para detectar se o loop de decodificação realmente parou.
-          ultimaCallbackQR = Date.now();
           if (!resultado || enviando || !iniciado) return;
           const payload = String(resultado.getText() || '').trim();
           if (!payload) return;
@@ -759,60 +424,26 @@
         });
 
         if (iniciado && !enviando) {
-          btnIniciar.disabled = true;
-          btnReiniciar.disabled = false;
-          iniciarVigilanciaCamera();
-          video.muted = true;
-          video.autoplay = true;
-          video.playsInline = true;
-          try { await video.play(); } catch (e) { /* ZXing já inicia o vídeo; vigilância detecta falha */ }
           // Pede foco/exposição contínuos quando o navegador expõe esses controles;
           // em dispositivos sem suporte, mantém o foco automático padrão.
           await solicitarFocoContinuo();
           if (!iniciado || enviando) return;
-          informar('Câmera ativa. O QR é procurado na imagem inteira e também em regiões ampliadas, incluindo áreas inferiores e laterais.');
-          agendarBuscaQRRecortada(1700);
+          informar('Câmera ativa. QR Code priorizado; para texto, centralize os 10 caracteres na faixa da imagem.');
           iniciarReconhecimentoTexto();
         }
       } catch (erro) {
         pararLeitura();
-        informar('Não foi possível ativar o leitor: ' + (erro && erro.message ? erro.message : String(erro)) + '. Confira a conexão, a permissão de câmera e tente novamente.');
+        informar('Não foi possível ativar a câmera: ' + (erro && erro.message ? erro.message : String(erro)) + '. Verifique a permissão de câmera do navegador.');
       }
     }
 
     btnIniciar.addEventListener('click', iniciarLeitura);
-    btnReiniciar.addEventListener('click', reiniciarManualmente);
     btnCancelar.addEventListener('click', () => {
       pararLeitura();
       window.close();
       setTimeout(() => informar('Você pode fechar esta guia e retornar ao aplicativo.'), 300);
     });
-    document.addEventListener('visibilitychange', () => {
-      if (document.hidden) {
-        if (iniciado && !enviando) {
-          retomarAoVoltar = true;
-          pararLeitura();
-          informar('Leitura pausada enquanto o navegador estava em segundo plano. Preparando a câmera novamente…');
-        }
-        return;
-      }
-      if (retomarAoVoltar && !enviando) {
-        retomarAoVoltar = false;
-        setTimeout(() => {
-          if (!document.hidden && !iniciado && !enviando) iniciarLeitura();
-        }, 350);
-      }
-    });
-    window.addEventListener('pagehide', () => {
-      if (iniciado && !enviando) retomarAoVoltar = true;
-      pararLeitura();
-    });
-    window.addEventListener('pageshow', () => {
-      if (retomarAoVoltar && !document.hidden && !enviando) {
-        retomarAoVoltar = false;
-        setTimeout(() => { if (!iniciado && !enviando && !document.hidden) iniciarLeitura(); }, 350);
-      }
-    });
+    window.addEventListener('pagehide', pararLeitura);
   </script>
 </body>
 </html>
